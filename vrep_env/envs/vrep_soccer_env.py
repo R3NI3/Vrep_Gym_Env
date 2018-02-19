@@ -1,22 +1,32 @@
-import vrep
-
 #import os, subprocess, time, signal
 import gym
 from gym import error, spaces
 from gym import utils
 from gym.utils import seeding
 
+import vrep
+import time
+import numpy as np
+
 class VrepSoccerEnv(gym.Env, utils.EzPickle):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, ip, port, time_step, scene_path, actuator_names, robot_names, object_names):
+    def __init__(self):
+        ip = '127.0.0.1'
+        port = 19997
+        time_step = 0.01
+        actuator_names = ['LeftMotor', 'RightMotor']
+        object_names = ['Bola']
+        robot_names = ['DifferentialDriveRobot']
+        scene_path = './Cenario.ttt'
          # Connect to the V-REP continuous server
+        vrep.simxFinish(-1)
         self.clientID = vrep.simxStart(ip, port, True, True, -500000, 5)
         if self.clientID != -1: # if we connected successfully
             print ('Connected to remote API server')
         else:
             raise Exception()
-        _configure_environment(scene_path)
+        self._configure_environment(scene_path)
         # -------Setup the simulation
         vrep.simxSynchronous(self.clientID, True) #if we need to be syncronous
         # move simulation ahead one time step
@@ -27,15 +37,18 @@ class VrepSoccerEnv(gym.Env, utils.EzPickle):
                 time_step, # specify a simulation time step
                 vrep.simx_opmode_oneshot)
 
-        get_handles(actuator_names, robot_names, object_names)
+        self.get_handles(actuator_names, robot_names, object_names)
 
         self.time_step = time_step
-        shape = len(robot_names)*6 + len(object_names*6)
-        self.observation_space = spaces.Box(low=0, high=1700, shape=(shape))
+        #todo check if observation_space and action_space are correct
+        shape = len(robot_names)*6 + len(object_names)*6
+        self.observation_space = spaces.Box(low=0, high=1700, shape=[shape])
         shape = len(actuator_names)
-        self.action_space = spaces.Box(low=-10, high=10, shape=(shape))
+        self.action_space = spaces.Box(low=-10, high=10, shape=[shape])
 
     def __del__(self):
+        vrep.simxPauseSimulation(self.clientID, vrep.simx_opmode_blocking)
+        time.sleep(.05)
         vrep.simxFinish(self.clientID)
 
     def _configure_environment(self, scene_path):
@@ -44,28 +57,37 @@ class VrepSoccerEnv(gym.Env, utils.EzPickle):
         a different server configuration. By default, we initialize one
         offense agent against no defenders.
         """
-        vrep.simxLoadScene(self.clientID, self.scene_path, 1,vrep.simx_opmode_blocking)
+        vrep.simxLoadScene(self.clientID, scene_path, 1,vrep.simx_opmode_blocking)
 
-    def _step(self, action):
-        _take_action(action)
-        #:TODO
-        pass
+    def step(self, action):
+        self._take_action(action)
+        state_info = self.getSimulationState()
+        return state_info,self.get_reward(),False, None
 
-    def _get_reward(state_info):
+    def _take_action(self, action):
+        for idx,(key,motor_handle) in enumerate(self.act_handles.items()):
+            vrep.simxSetJointTargetVelocity(self.clientID, motor_handle,
+                        action[key], # target velocity
+                        vrep.simx_opmode_blocking)
+        vrep.simxSynchronousTrigger(self.clientID)
+
+    def get_reward(self):
+        state_info = self.state
         reward = 0
-        robot_pos = np.array(state_info[robot_names[0]][0])
-        target_pos = np.array(state_info[object_names[0]][0])
+        robot_pos = np.array(state_info['DifferentialDriveRobot'][0])
+        target_pos = np.array(state_info['Bola'][0])
         distance = np.linalg.norm(robot_pos - target_pos)
         reward = 1/ distance if distance != 0 else 1000
         return reward
 
-    def _reset(self):
+    def reset(self):
         vrep.simxStopSimulation(self.clientID, vrep.simx_opmode_blocking)
+        time.sleep(.05)
+        vrep.simxStartSimulation(self.clientID, vrep.simx_opmode_blocking)
+        time.sleep(.05)
+        return self.getSimulationState()
 
-    def _render(self):
-        pass
-
-    def _take_action(self, action):
+    def render(self):
         pass
 
     def stop_robot(self, actuator_names):
@@ -125,13 +147,13 @@ class VrepSoccerEnv(gym.Env, utils.EzPickle):
         return 0
 
     def getSimulationState(self):
-        state = {}
+        self.state = {}
         for name, handle in self.ddr_handles.items():
-            state[name] = [self.get_position(name),self.get_orientation(name)]
+            self.state[name] = [self.get_position(name),self.get_orientation(name)]
         for name, handle in self.obj_handles.items():
-            state[name] = [self.get_position(name),self.get_orientation(name)]
+            self.state[name] = [self.get_position(name),self.get_orientation(name)]
 
-        return state
+        return self.state
 
     def get_handles(self, actuator_names, robot_names, object_names):
         # get the handles for each motor and set up streaming
